@@ -1,0 +1,346 @@
+#!/usr/bin/env ruby
+
+require 'set'
+require 'singleton'
+require 'io/console'
+require 'shellwords'
+
+module Duo
+
+  def self.jp_voice
+    'Kyoko'
+  end
+
+  def self.system_available?
+    case
+    when !system('which say >/dev/null 2>&1')
+      $stderr.puts 'command not found: say'
+      false
+    when !system("say -v #{jp_voice} '' >/dev/null 2>&1")
+      $stderr.puts "say: voice not found: #{jp_voice}"
+      false
+    else
+      true
+    end
+  end
+
+  module Key
+    class << self
+      keys = {
+        :ctrl_c => "\u0003",
+        :ctrl_h => "\b",
+        :ctrl_n => "\u000E",
+        :ctrl_s => "\u0013",
+        :up     => "\e[A\u0003",
+        :right  => "\e[1C",
+      }
+
+      keys.each do |key, value|
+        define_method(key) { value }
+        define_method(key.to_s + '?') {|v| v === value }
+      end
+    end
+  end
+
+  class SentenceNotFound < StandardError
+    def initialize(id)
+      super "Couldn't find Sentence with id = #{id}"
+    end
+  end
+
+  class Sentence
+    include Comparable
+
+    attr_reader :id, :en, :ja
+
+    def initialize(params={})
+      @id = self.class.auto_increment
+      @en = params[:en]
+      @ja = params[:ja]
+    end
+
+    def <=>(other)
+      id <=> other.id
+    end
+
+    def quiz
+      Thread.new { say }
+
+      show_banner
+      print Key.up
+      input_answer
+    end
+
+    def play
+      show_banner(true)
+      say
+    end
+
+    def say(params={})
+      if params[:except] != :ja
+        self.class.say(@ja, :voice => Duo::jp_voice)
+      end
+
+      if params[:except] != :en
+        self.class.say(@en)
+      end
+    end
+
+    def self.say(sentence, options={})
+      say_command = "say"
+
+      if options[:voice]
+        say_command = "#{say_command} --voice #{options[:voice]}"
+      end
+
+      if options[:rate]
+        say_command = "#{say_command} --rate #{options[:rate]}"
+      end
+
+      `#{say_command} #{sentence.shellescape}`
+    end
+
+    private
+
+    def self.auto_increment
+      @auto_increment ||= 0
+      @auto_increment += 1
+    end
+
+    def show_banner(answer=false)
+      column = answer ? @en : @en.gsub(/\w/, '_')
+
+      puts @id
+      puts @ja
+      puts column
+    end
+
+    def input_answer
+      pos = 0
+
+      IO.console.noecho do |io|
+        loop do
+          if pos >= @en.length
+            puts
+            return true
+          end
+
+          if !(@en[pos] =~ /\w/)
+            print Key.right
+            pos += 1
+            redo
+          end
+
+          while c = io.getch
+            if Key.ctrl_c?(c) # Quit
+              puts
+              puts @en
+              exit 0
+            end
+
+            if Key.ctrl_n?(c) # Next question
+              puts
+              puts @en
+              return false
+            end
+
+            if Key.ctrl_s?(c) # Read a sentence
+              Thread.new { say(:except => :ja) }
+              next
+            end
+
+            if c =~ /#{@en[pos]}/i || Key.ctrl_h?(c)  # Open 1-letter
+              print @en[pos]
+              pos += 1
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+
+  class SentenceSet < SortedSet
+    include Singleton
+
+    def initialize
+      super
+
+      while (en = DATA.gets) && (ja = DATA.gets) do
+        add Sentence.new(:en => en.chomp, :ja => ja.chomp)
+      end
+    end
+
+    def [](params)
+      case params
+      when Integer
+        detect {|sentence| sentence.id == params} \
+          or raise SentenceNotFound.new(params)
+      when Range
+        select {|sentence| params.include?(sentence.id)}
+      end
+    end
+
+    def sample
+      self[rand(size) + 1]
+    end
+  end
+
+  class OptionParser
+    def self.parse!(argv)
+      options = {}
+
+      OptionParser.new.instance_eval { |opt|
+        command_name = File.basename($0)
+        opt.banner = "Usage: #{command_name} [options]"
+
+        opt.on('--list', 'show all sentences') {|list|
+          options[:list] = list
+        }
+
+        opt.on('--play [RANGE|NUMBER]', 'play sentences') {|range_or_number|
+          options[:play] = range_or_number
+        }
+
+        opt.on('--test [RANGE]', 'questions sequentially') {|test|
+          options[:test] = test
+        }
+
+        opt.on('--number [NUMBER]', 'number of questions') {|number|
+          options[:number] = number
+        }
+
+        opt.on('--random [RANGE]', 'range of questions') {|range|
+          options[:random] = range
+        }
+
+        opt.parse!(argv)
+      }
+
+      cast options
+    end
+
+    private
+
+    def self.cast(options)
+      options.inject({}) do |opts, (key, value)|
+        new_value = case value
+                    when nil
+                      true
+                    when /\A\d+\z/
+                      value.to_i
+                    when /\A(\d+)\-(\d+)\z/
+                      Range.new($1.to_i, $2.to_i)
+                    else
+                      value
+                    end
+        opts.update(key => new_value)
+      end
+    end
+  end
+end
+
+if __FILE__ == $0
+  include Duo
+
+  begin
+    require 'optparse'
+
+    params       = Duo::OptionParser.parse!(ARGV)
+    sentence_set = SentenceSet.instance
+
+    case
+    when !Duo::system_available?
+      exit 1
+    when params[:list]
+      sentence_set.each do |sentence|
+        puts [sentence.id, sentence.en, sentence.ja]
+        puts
+      end
+
+    when params[:play]
+      case params[:play]
+      when Integer
+        number = params[:play]
+        sentence_set[number].play
+      when Range
+        range = params[:play]
+        sentence_set[range].each do |sentence|
+          sentence.play
+          sleep 0.5
+        end
+      else
+        sentence_set.each do |sentence|
+          sentence.play
+          sleep 0.5
+        end
+      end
+
+    when params[:test]
+      sentences = \
+        if params[:test].is_a?(Range)
+          range = params[:test]
+          sentence_set[range]
+        else
+          sentence_set
+        end
+      sentences.each do |sentence|
+        sentence.quiz
+      end
+
+    when params[:number]
+      if params[:number].is_a?(Integer)
+        sentence_set[params[:number]].quiz
+      else
+        raise OptionParser::InvalidArgument.new(params[:number])
+      end
+
+    when params[:random]
+      if params[:random].is_a?(Range)
+        range = params[:random]
+        sentence_set[range].sample.quiz
+      else
+        raise OptionParser::InvalidArgument.new(params[:random])
+      end
+
+    else
+      sentence_set.sample.quiz
+    end
+  rescue Errno::EPIPE
+    # silent
+  end
+end
+
+__END__
+This company uses an automated system for billing.
+この会社は請求に自動システムを使っている。
+The company offered me a temporary position.
+その会社は私に臨時の仕事を提示した。
+The company took interest in my biotech background.
+その会社は私の生命工学の経歴に関心を持った。
+Write your name and profession on the form.
+フォームにお名前と職業をご記入ください。
+These traning sessions are for new recruits.
+これらの研修会は新入社員のためのものだ。
+The repair crew is working on the road.
+補修チームが道路の作業をしている。
+Increased sales made revenue higher this quarter.
+売り上げが伸びて、今四半期の収入が増加した。
+The travel agency proposed three different vacation itineraries.
+旅行代理店は3つの異なった休暇旅行の計画を提案した。
+Sandra is in charge of ordering office supplies.
+サンドラは事務用品の注文を担当している。
+I'll present our findings on the car market.
+自動車市場についての私の調査結果を発表します。
+System offers great security at a low price.
+システムは安価に高度な安全を提供します。
+Passengers are advised to keep ferry tickets safe.
+乗客の皆様はフェリーの切符をしっかり保管してください。
+I have enough change for the parking meter.
+駐車メーター用の小銭は十分にありますよ。
+To track parcels, enter tracking numbers below.
+荷物を追跡するには、以下に追跡番号を入力してください。
+My house is in a quiet neighborhood.
+私の家は静かな地域にある。
+Our office climate is positive and team-oriented.
+私のオフィスの雰囲気は良好で、チーム一丸になっている。
