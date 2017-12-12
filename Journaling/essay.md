@@ -1,4 +1,4 @@
-グローバル時代を生き抜くためのハーバード式英語学習ほう
+グローバル時代を生き抜くためのハーバード式英語学習法
 
 * * *
 
@@ -58,7 +58,7 @@ My hometown is Nagasaki.
 
 It consists of a lot of islands.
 
-It is a historical city.
+It is one of the historic cities.
 
 It is a famous for its beautiful night view.
 
